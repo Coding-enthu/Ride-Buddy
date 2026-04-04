@@ -6,16 +6,20 @@ const express = require("express");
 const cors = require("cors");
 
 const hazardRoutes = require("./routes/hazard.routes.js");
-const routeRoutes = require("./routes/route.routes.js");
-const userRoutes = require("./routes/user.routes.js"); // NEW
+const routeRoutes  = require("./routes/route.routes.js");
+const userRoutes   = require("./routes/user.routes.js");
+const govRoutes    = require("./routes/gov.routes.js"); // gov dashboard
 
 const app = express();
 
 // Allow both localhost ports and production domain
 const allowedOrigins = [
-  "http://localhost:3000",
+  "http://localhost:3000",  // RideBuddy frontend
   "http://localhost:3001",
-  process.env.FRONTEND_URL, // set in production .env
+  "http://localhost:5173",  // Gov dashboard (Vite default)
+  "http://localhost:5174",  // Gov dashboard (Vite alt)
+  process.env.FRONTEND_URL,
+  process.env.GOV_URL,
 ].filter(Boolean);
 
 app.use(
@@ -32,10 +36,13 @@ app.use(
 app.use(express.json({ limit: "10mb" })); // 10mb to accommodate base64 images
 
 // ── Routes ──────────────────────────────────────────────────────────────────
-app.use("/auth", require("./routes/auth.routes.js")); // NEW — register/login/me
-app.use("/api/hazards", hazardRoutes);   // existing
-app.use("/api/route", routeRoutes);      // existing
-app.use("/user", userRoutes);            // existing
+app.use("/auth",        require("./routes/auth.routes.js")); // register/login/me
+app.use("/api/hazards", hazardRoutes);   // existing — UNCHANGED
+app.use("/api/route",   routeRoutes);    // existing — UNCHANGED
+app.use("/user",        userRoutes);     // existing — UNCHANGED
+app.use("/api/gov",     govRoutes);      // NEW — gov dashboard APIs
+// Gov also needs to PATCH /api/hazards/:id/status — registered here
+app.use("/api",         govRoutes);      // mounts PATCH /api/hazards/:id/status
 
 // test route — unchanged
 app.get("/", (req, res) => {
