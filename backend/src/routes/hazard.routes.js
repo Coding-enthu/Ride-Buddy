@@ -5,7 +5,10 @@ const {
 	createHazard,
 	getHazards,
 	getNearbyHazards,
+	checkHazardExists,
 } = require("../controllers/hazard.controller.js");
+
+router.get("/check", checkHazardExists);
 
 // POST /api/hazards — report a new hazard
 router.post("/", createHazard);
