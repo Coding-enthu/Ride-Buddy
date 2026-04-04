@@ -1,38 +1,214 @@
-# RideBuddy Backend API Guide (for Frontend)
+# RideBuddy Backend API Reference
 
-This backend is an Express API that provides:
+This backend exposes APIs for:
 
-- hazard reporting and hazard retrieval
-- route generation with hazard-aware scoring
+- health check
+- hazards CRUD-like reads and create
+- nearby hazard lookup
+- duplicate hazard check
+- hazard-aware route selection
 
-Base URL (local):
+Base URL (local): `http://localhost:5000`
 
-- `http://localhost:5000`
+## API Summary
 
-## Quick Health Check
+| Method | Path                | Purpose                                    |
+| ------ | ------------------- | ------------------------------------------ |
+| GET    | /                   | Health check                               |
+| POST   | /api/hazards        | Create hazard report                       |
+| GET    | /api/hazards        | Get hazards (all or by bounding box)       |
+| GET    | /api/hazards/nearby | Get hazards near a point                   |
+| GET    | /api/hazards/check  | Check whether hazard already exists nearby |
+| GET    | /api/route          | Get hazard-aware best route                |
 
-### `GET /`
+## 1) Health Check
 
-Returns a simple health string.
+### GET /
 
-Response example:
+Use this to verify the backend is up.
+
+Success response:
 
 ```json
 "API is running 🚀"
 ```
 
----
+## 2) Create Hazard
 
-## 1) Get Best Route (Hazard-Aware)
+### POST /api/hazards
 
-### `GET /api/route`
+Creates a hazard row in database.
 
-Computes multiple OSRM routes and returns the best route after applying hazard penalties.
+Request body format:
 
-### Query Params
+```json
+{
+	"type": "pothole",
+	"lat": 22.5726,
+	"lng": 88.3639,
+	"severity": 2
+}
+```
 
-- `from` (required): `lng,lat`
-- `to` (required): `lng,lat`
+Field format:
+
+- `type`: string (required)
+- `lat`: number (required)
+- `lng`: number (required)
+- `severity`: number (optional, defaults to `1`)
+
+Success response (`201`):
+
+```json
+{
+	"id": 10,
+	"type": "pothole",
+	"lat": 22.5726,
+	"lng": 88.3639,
+	"severity": 2,
+	"created_at": "2026-04-04T10:30:12.000Z"
+}
+```
+
+Error response (`500`):
+
+```json
+{
+	"error": "Hazard already reported nearby"
+}
+```
+
+## 3) Get Hazards
+
+### GET /api/hazards
+
+Returns hazard rows.
+
+Mode A (all hazards):
+
+```http
+GET /api/hazards
+```
+
+Mode B (bounding box filter):
+
+```http
+GET /api/hazards?minLat=22.50&maxLat=22.70&minLng=88.20&maxLng=88.50
+```
+
+Query format:
+
+- `minLat`, `maxLat`, `minLng`, `maxLng`: numbers (optional as a set)
+- If `minLat` is not provided, API returns all hazards
+
+Success response (`200`):
+
+```json
+[
+	{
+		"id": 10,
+		"type": "pothole",
+		"lat": 22.5726,
+		"lng": 88.3639,
+		"severity": 2,
+		"created_at": "2026-04-04T10:30:12.000Z"
+	}
+]
+```
+
+Error response (`500`):
+
+```json
+{
+	"error": "Internal server error message"
+}
+```
+
+## 4) Get Nearby Hazards
+
+### GET /api/hazards/nearby
+
+Returns hazards near a given point within a radius (meters).
+
+Query format:
+
+- `lat`: number (required)
+- `lng`: number (required)
+- `radius`: number (optional, default `500`)
+
+Example:
+
+```http
+GET /api/hazards/nearby?lat=22.57&lng=88.36&radius=500
+```
+
+Success response (`200`):
+
+```json
+[
+	{
+		"id": 10,
+		"type": "pothole",
+		"lat": 22.5726,
+		"lng": 88.3639,
+		"severity": 2,
+		"distance_meters": 128.44
+	}
+]
+```
+
+Validation error (`400`):
+
+```json
+{
+	"error": "lat and lng are required"
+}
+```
+
+## 5) Check Hazard Existence
+
+### GET /api/hazards/check
+
+Checks whether a hazard has already been reported near a point.
+
+Query format:
+
+- `lat`: number (required)
+- `lng`: number (required)
+
+Example:
+
+```http
+GET /api/hazards/check?lat=22.5726&lng=88.3639
+```
+
+Success response (`200`):
+
+```json
+{
+	"exists": true,
+	"debug": "CHECK_API"
+}
+```
+
+Validation error (`400`):
+
+```json
+{
+	"error": "lat and lng required"
+}
+```
+
+## 6) Get Hazard-Aware Route
+
+### GET /api/route
+
+Fetches route alternatives from OSRM, scores each route with hazard penalties, and returns the best route.
+
+Query format:
+
+- `from`: `lng,lat` string (required)
+- `to`: `lng,lat` string (required)
 
 Example:
 
@@ -40,7 +216,7 @@ Example:
 GET /api/route?from=88.3639,22.5726&to=88.4339,22.6026
 ```
 
-### Success Response Shape
+Success response (`200`):
 
 ```json
 {
@@ -76,116 +252,49 @@ GET /api/route?from=88.3639,22.5726&to=88.4339,22.6026
 			"pothole": 2,
 			"waterlogging": 1
 		}
-	}
+	},
+	"hazardsOnRoute": [
+		{
+			"id": 10,
+			"type": "pothole",
+			"lat": 22.5726,
+			"lng": 88.3639,
+			"severity": 2
+		}
+	]
 }
 ```
 
-### Error Responses
-
-- `400` when `from` or `to` is missing
-
-```json
-{ "error": "from and to required" }
-```
-
-- `500` for server/internal errors
-
-### Frontend Usage (Axios)
-
-```js
-const res = await axios.get("http://localhost:5000/api/route", {
-	params: {
-		from: `${fromLng},${fromLat}`,
-		to: `${toLng},${toLat}`,
-	},
-});
-
-const bestRoute = res.data.bestRoute;
-const line = bestRoute.geometry; // GeoJSON LineString
-```
-
-> Note: Use `bestRoute.geometry` for drawing the selected path. If you want alternatives, read `allRoutes`.
-
----
-
-## 2) Hazards API
-
-### `POST /api/hazards`
-
-Create a hazard record.
-
-Request body:
+Validation error (`400`):
 
 ```json
 {
-	"type": "pothole",
-	"lat": 22.5726,
-	"lng": 88.3639,
-	"severity": 2
+	"error": "from and to required"
 }
 ```
 
-Fields:
+Error response (`500`):
 
-- `type` (string)
-- `lat` (number)
-- `lng` (number)
-- `severity` (number, optional, defaults to `1`)
-
-Success response (`201`): inserted hazard row.
-
----
-
-### `GET /api/hazards`
-
-Returns hazards.
-
-#### Mode A: All hazards
-
-```http
-GET /api/hazards
+```json
+{
+	"error": "Internal server error message"
+}
 ```
 
-#### Mode B: Hazards within a bounding box
+## Local Setup
 
-```http
-GET /api/hazards?minLat=22.50&maxLat=22.70&minLng=88.20&maxLng=88.50
-```
-
-Query params for bbox mode:
-
-- `minLat`
-- `maxLat`
-- `minLng`
-- `maxLng`
-
-If `minLat` is not provided, backend returns all hazards.
-
----
-
-## Frontend Integration Notes
-
-- Current CORS is enabled globally (`app.use(cors())`), so local frontend can call API directly.
-- Route endpoint path is **`/api/route`** (not `/route`).
-- Route query param names are **`from`** and **`to`** (not `start`/`end`).
-- Coordinate format expected by backend route API is `lng,lat`.
-
----
-
-## Local Run (Backend)
-
-1. Add `.env` file in `backend/` with:
+Create `.env` in backend folder:
 
 ```env
 DATABASE_URL=your_postgres_connection_string
 PORT=5000
 ```
 
-2. Install and run:
+Install and run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-Server starts on `http://localhost:5000` by default.
+Server runs on `http://localhost:5000` (unless `PORT` is changed).

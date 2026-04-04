@@ -106,3 +106,57 @@ exports.getNearbyHazards = async (lat, lng, radiusMeters = 500) => {
   );
   return result.rows;
 };
+
+function isNearby(lat1, lng1, lat2, lng2) {
+	// 🔹 ensure numbers
+	lat1 = parseFloat(lat1);
+	lng1 = parseFloat(lng1);
+	lat2 = parseFloat(lat2);
+	lng2 = parseFloat(lng2);
+
+	const R = 6371e3; // meters
+	const toRad = (deg) => (deg * Math.PI) / 180;
+
+	const φ1 = toRad(lat1);
+	const φ2 = toRad(lat2);
+	const Δφ = toRad(lat2 - lat1);
+	const Δλ = toRad(lng2 - lng1);
+
+	const a =
+		Math.sin(Δφ / 2) ** 2 +
+		Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+
+	const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+	const distance = R * c;
+
+	return distance < 50; // 50 meters
+}
+
+exports.checkHazardExists = async (lat, lng) => {
+	lat = parseFloat(lat);
+	lng = parseFloat(lng);
+
+	// 🔹 ~100m bounding box (fast DB filter)
+	const range = 0.001;
+
+	const result = await pool.query(
+		`SELECT * FROM hazards
+     WHERE lat BETWEEN $1 AND $2
+     AND lng BETWEEN $3 AND $4`,
+		[lat - range, lat + range, lng - range, lng + range],
+	);
+
+	const nearbyHazards = result.rows;
+
+	// 🔹 precise check
+	for (let h of nearbyHazards) {
+		const match = isNearby(lat, lng, h.lat, h.lng);
+
+		console.log("Comparing with:", h.lat, h.lng, "=>", match);
+
+		if (match===true) return true;
+		else return false;
+	}
+
+};

@@ -125,3 +125,22 @@ exports.getNearbyHazards = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// Check if hazard already exist
+exports.checkHazardExists = async (req, res) => {
+	try {
+		const { lat, lng } = req.query;
+
+		if (!lat || !lng) {
+			return res.status(400).json({ error: "lat and lng required" });
+		}
+
+		const exists = await hazardService.checkHazardExists(lat, lng);
+		console.log("FINAL EXISTS:", exists); // 👈 ADD THIS
+
+		//res.json({ exists: exists });
+		return res.json({ exists, debug: "CHECK_API" });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+};
