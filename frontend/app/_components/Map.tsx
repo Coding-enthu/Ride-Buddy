@@ -4,16 +4,24 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import maplibregl, { Map as MapLibreMap, GeoJSONSource } from "maplibre-gl";
 import type { Feature, LineString, FeatureCollection, Point } from "geojson";
 import Link from "next/link";
+import * as turf from "@turf/turf";
 
 import { useUserLocation } from "../_hooks/useUserLocation";
 import { useNotifications } from "../_hooks/useNotifications";
 import { useHazardCache, type CachedHazard } from "../_hooks/useHazardCache";
-import { useAuth } from "../_hooks/useAuth"; // NEW
+import { useAuth } from "../_hooks/useAuth";
 
 import ReportButton from "./ReportButton";
 import BottomSheet from "./BottomSheet";
 import RoutePanel from "./RoutePanel";
+import RouteSelector from "./RouteSelector";
+import NavigationPanel from "./NavigationPanel";
 import WarningBanner from "./WarningBanner";
+
+import {
+  formatTurnInstruction,
+  getNextAnnouncementDistance,
+} from "../_utils/navigationInstructions";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 type Place = {
@@ -25,6 +33,59 @@ interface RouteInfo {
   distance: number;
   duration: number;
   hazardCount: number;
+}
+
+interface RouteData {
+  distance: number;
+  duration: number;
+  geometry: LineString;
+  legs?: Routeleg[];
+}
+
+interface Routeleg {
+  steps: RouteStep[];
+  distance: number;
+  duration: number;
+}
+
+interface RouteStep {
+  maneuver: {
+    type: string;
+    modifier?: string;
+    location: [number, number];
+  };
+  name: string;
+  distance: number;
+  duration: number;
+  geometry: LineString;
+}
+
+interface RouteAnalysis {
+  score: number;
+  hazardCount: number;
+  penalty: number;
+  typeBreakdown: Record<string, number>;
+}
+
+interface RoutesResponse {
+  bestRoute: RouteData;
+  allRoutes: RouteData[];
+  analysis: RouteAnalysis;
+  routeAnalyses?: RouteAnalysis[];
+  routeHazards?: any[][];
+  hazardsOnRoute: any[];
+}
+
+interface NavigationState {
+  isActive: boolean;
+  currentStepIndex: number;
+  distanceToNextTurn: number;
+  bearing: number;
+  routeCoordinates: [number, number][];
+  steps: RouteStep[];
+  hazardsOnRoute: any[];
+  announcedDistances: Set<number>;
+  announcedHazards: Set<string>;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -64,6 +125,7 @@ export default function Map() {
   const endMarker = useRef<maplibregl.Marker | null>(null);
   const activePopup = useRef<maplibregl.Popup | null>(null);
   const notifiedHazardIds = useRef<Set<number>>(new Set());
+  const isClickToSelectModeRef = useRef<boolean>(false);
 
   // Search state
   const [fromQuery, setFromQuery] = useState("");
@@ -76,18 +138,43 @@ export default function Map() {
   const [end, setEnd] = useState<[number, number] | null>(null);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null);
+  const [allRoutesData, setAllRoutesData] = useState<RoutesResponse | null>(null);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
 
   // UI state
   const [warning, setWarning] = useState<string | null>(null);
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [isMapLoaded, setIsMapLoaded] = useState(false);
   const [hazards, setHazards] = useState<CachedHazard[]>([]);
+  const [isClickToSelectMode, setIsClickToSelectMode] = useState(false);
+
+  // Navigation state
+  const [navigation, setNavigation] = useState<NavigationState>({
+    isActive: false,
+    currentStepIndex: 0,
+    distanceToNextTurn: 0,
+    bearing: 0,
+    routeCoordinates: [],
+    steps: [],
+    hazardsOnRoute: [],
+    announcedDistances: new Set(),
+    announcedHazards: new Set(),
+  });
+  const lastPositionRef = useRef<{ lat: number; lng: number } | null>(null);
+  const gpsWatchIdRef = useRef<number | null>(null);
+  const offRouteTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isReroutingRef = useRef<boolean>(false);
+
+  // Update ref when state changes
+  useEffect(() => {
+    isClickToSelectModeRef.current = isClickToSelectMode;
+  }, [isClickToSelectMode]);
 
   const apiKey = process.env.NEXT_PUBLIC_MAPTILER_KEY;
-  const { position } = useUserLocation();
+  const { position, error: locationError } = useUserLocation();
   const { permission, requestPermission, sendNotification } = useNotifications();
   const { getCache, setCache } = useHazardCache();
-  const { user, idToken } = useAuth(); // NEW
+  const { user, idToken } = useAuth();
 
   // ── Map Init ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -120,6 +207,14 @@ export default function Map() {
     map.current.on("load", () => {
       initHazardLayer();
       setIsMapLoaded(true);
+    });
+
+    // Click handler for destination selection
+    map.current.on("click", (e) => {
+      if (!isClickToSelectModeRef.current) return;
+      
+      const { lng, lat } = e.lngLat;
+      handleMapClick(lng, lat);
     });
 
     // Suppress "Image ' ' could not be loaded" noise from MapTiler sprite mismatches
@@ -279,19 +374,91 @@ export default function Map() {
 
     if (!userMarker.current) {
       const el = document.createElement("div");
-      el.className = "user-location-dot";
-      el.innerHTML = `
-        <div class="user-location-pulse"></div>
-        <div class="user-location-center"></div>
-      `;
-      userMarker.current = new maplibregl.Marker({ element: el, anchor: "center" })
+      el.className = navigation.isActive ? "user-location-navigation" : "user-location-dot";
+      
+      if (navigation.isActive) {
+        // Navigation mode: directional arrow
+        el.innerHTML = `
+          <div class="user-location-arrow">
+            <svg width="40" height="40" viewBox="0 0 40 40">
+              <defs>
+                <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+                  <feOffset dx="0" dy="1" result="offsetblur"/>
+                  <feComponentTransfer>
+                    <feFuncA type="linear" slope="0.3"/>
+                  </feComponentTransfer>
+                  <feMerge>
+                    <feMergeNode/>
+                    <feMergeNode in="SourceGraphic"/>
+                  </feMerge>
+                </filter>
+              </defs>
+              <!-- Outer glow circle -->
+              <circle cx="20" cy="20" r="18" fill="rgba(124, 58, 237, 0.2)" />
+              <!-- Arrow shape pointing up -->
+              <path d="M20 5 L28 25 L20 21 L12 25 Z" fill="#7c3aed" stroke="#fff" stroke-width="2" filter="url(#shadow)"/>
+              <!-- Center dot -->
+              <circle cx="20" cy="20" r="4" fill="#fff" stroke="#7c3aed" stroke-width="2"/>
+            </svg>
+          </div>
+        `;
+      } else {
+        // Normal mode: pulsing dot
+        el.innerHTML = `
+          <div class="user-location-pulse"></div>
+          <div class="user-location-center"></div>
+        `;
+      }
+      
+      userMarker.current = new maplibregl.Marker({ element: el, anchor: "center", rotationAlignment: "map" })
         .setLngLat(lnglat)
         .addTo(map.current);
 
       // Fly to user location on first GPS fix
-      map.current.flyTo({ center: lnglat, zoom: 15, duration: 1500 });
+      if (!navigation.isActive) {
+        map.current.flyTo({ center: lnglat, zoom: 15, duration: 1500 });
+      }
     } else {
       userMarker.current.setLngLat(lnglat);
+      
+      // Update marker style if navigation state changed
+      const el = userMarker.current.getElement();
+      const currentClass = el.className;
+      const shouldBeNav = navigation.isActive ? "user-location-navigation" : "user-location-dot";
+      
+      if (currentClass !== shouldBeNav) {
+        el.className = shouldBeNav;
+        if (navigation.isActive) {
+          el.innerHTML = `
+            <div class="user-location-arrow">
+              <svg width="40" height="40" viewBox="0 0 40 40">
+                <defs>
+                  <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+                    <feOffset dx="0" dy="1" result="offsetblur"/>
+                    <feComponentTransfer>
+                      <feFuncA type="linear" slope="0.3"/>
+                    </feComponentTransfer>
+                    <feMerge>
+                      <feMergeNode/>
+                      <feMergeNode in="SourceGraphic"/>
+                    </feMerge>
+                  </filter>
+                </defs>
+                <circle cx="20" cy="20" r="18" fill="rgba(124, 58, 237, 0.2)" />
+                <path d="M20 5 L28 25 L20 21 L12 25 Z" fill="#7c3aed" stroke="#fff" stroke-width="2" filter="url(#shadow)"/>
+                <circle cx="20" cy="20" r="4" fill="#fff" stroke="#7c3aed" stroke-width="2"/>
+              </svg>
+            </div>
+          `;
+        } else {
+          el.innerHTML = `
+            <div class="user-location-pulse"></div>
+            <div class="user-location-center"></div>
+          `;
+        }
+      }
     }
 
     // ── Proximity check ────────────────────────────────────────────────────
@@ -309,7 +476,7 @@ export default function Map() {
       setWarning(`⚠️ ${msg}`);
       sendNotification("RideBuddy — Hazard Nearby", msg);
     }
-  }, [position, isMapLoaded, hazards, sendNotification]);
+  }, [position, isMapLoaded, hazards, sendNotification, navigation.isActive]);
 
   // ── Use My Location (From field) ──────────────────────────────────────────
   const useMyLocation = () => {
@@ -336,6 +503,23 @@ export default function Map() {
     );
     const data = await res.json();
     return data.features || [];
+  };
+
+  // ── Reverse Geocoding ─────────────────────────────────────────────────────
+  const reverseGeocode = async (lng: number, lat: number): Promise<string> => {
+    if (!apiKey) return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    try {
+      const res = await fetch(
+        `https://api.maptiler.com/geocoding/${lng},${lat}.json?key=${apiKey}`
+      );
+      const data = await res.json();
+      if (data.features && data.features.length > 0) {
+        return data.features[0].place_name;
+      }
+    } catch (err) {
+      console.warn("Reverse geocoding failed:", err);
+    }
+    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
   };
 
   const handleFromSearch = async (value: string) => {
@@ -367,6 +551,7 @@ export default function Map() {
     setEnd(coords);
     setToQuery(name);
     setToResults([]);
+    setIsClickToSelectMode(false); // Auto-disable click mode after selection
     if (endMarker.current) endMarker.current.remove();
     if (map.current) {
       endMarker.current = new maplibregl.Marker({ color: "#ff4d6d" })
@@ -375,6 +560,74 @@ export default function Map() {
       map.current.flyTo({ center: coords, zoom: 14 });
     }
   };
+
+  // ── Handle Map Click for Destination Selection ────────────────────────────
+  const handleMapClick = async (lng: number, lat: number) => {
+    const coords: [number, number] = [lng, lat];
+    const locationName = await reverseGeocode(lng, lat);
+    selectTo(coords, locationName);
+  };
+
+  // ── Handle Route Selection ────────────────────────────────────────────────
+  const handleRouteSelection = useCallback((index: number) => {
+    if (!allRoutesData || !map.current) return;
+    
+    setSelectedRouteIndex(index);
+    const selectedRoute = allRoutesData.allRoutes[index];
+    
+    // Update route info for the selected route
+    const selectedAnalysis = allRoutesData.routeAnalyses?.[index];
+    setRouteInfo({
+      distance: selectedRoute.distance,
+      duration: selectedRoute.duration,
+      hazardCount: selectedAnalysis?.hazardCount ?? 0,
+    });
+
+    // Update route layer styles
+    allRoutesData.allRoutes.forEach((_, i) => {
+      const layerId = `route-${i}`;
+      if (map.current?.getLayer(layerId)) {
+        const isSelected = i === index;
+        const isBestRoute = i === 0;
+        map.current.setPaintProperty(
+          layerId,
+          "line-width",
+          isSelected ? 7 : (isBestRoute ? 6 : 4)
+        );
+        map.current.setPaintProperty(
+          layerId,
+          "line-opacity",
+          isSelected ? 1 : (isBestRoute ? 0.8 : 0.5)
+        );
+      }
+    });
+
+    // Fit map to selected route
+    const coords = selectedRoute.geometry.coordinates as [number, number][];
+    const bounds = coords.reduce(
+      (b: maplibregl.LngLatBounds, coord) => b.extend(coord),
+      new maplibregl.LngLatBounds(coords[0], coords[0])
+    );
+    map.current.fitBounds(bounds, { padding: 80, duration: 800 });
+
+    // Update warning for selected route
+    if (selectedAnalysis) {
+      const hCount = selectedAnalysis.hazardCount;
+      if (hCount > 0) {
+        const breakdown = selectedAnalysis.typeBreakdown ?? {};
+        const topType = Object.keys(breakdown).sort(
+          (a, b) => breakdown[b] - breakdown[a]
+        )[0];
+        setWarning(
+          `⚠️ ${hCount} hazard${hCount > 1 ? "s" : ""} on your route${topType ? ` (mostly ${topType})` : ""}. Drive carefully!`
+        );
+      } else {
+        setWarning(null);
+      }
+    } else {
+      setWarning(null);
+    }
+  }, [allRoutesData]);
 
   // ── Get Route ─────────────────────────────────────────────────────────────
   const getRoute = async () => {
@@ -394,6 +647,10 @@ export default function Map() {
       const data = await res.json();
       const mapInstance = map.current;
 
+      // Store full routes data
+      setAllRoutesData(data);
+      setSelectedRouteIndex(0); // Default to best route
+
       // ── Clean up old route layers ──────────────────────────────────────
       // Guard: only call getStyle() when the style is fully loaded to avoid
       // the "Cannot read properties of undefined (reading 'projection')" crash
@@ -407,19 +664,21 @@ export default function Map() {
         });
       } else {
         // Style not ready — remove by known names only (safe fallback)
-        ["route-best", "route-alt-0", "route-alt-1", "route-alt-2"].forEach((id) => {
+        for (let i = 0; i < 10; i++) {
+          const id = `route-${i}`;
           if (mapInstance.getLayer(id)) mapInstance.removeLayer(id);
           if (mapInstance.getSource(id)) mapInstance.removeSource(id);
-        });
+        }
       }
 
-      // ── Draw alternative routes (faded) ───────────────────────────────
-      data.allRoutes?.forEach((route: { geometry: LineString }, index: number) => {
-        const id = `route-alt-${index}`;
+      // ── Draw all routes ─────────────────────────────────────────────────
+      data.allRoutes?.forEach((route: RouteData, index: number) => {
+        const isBest = index === 0;
+        const id = `route-${index}`;
         const geojson: Feature<LineString> = {
           type: "Feature",
           geometry: route.geometry,
-          properties: {},
+          properties: { routeIndex: index, isBest },
         };
         mapInstance.addSource(id, { type: "geojson", data: geojson });
         mapInstance.addLayer({
@@ -427,23 +686,25 @@ export default function Map() {
           type: "line",
           source: id,
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#a855f7", "line-width": 3, "line-opacity": 0.3 },
+          paint: {
+            "line-color": isBest ? "#a855f7" : "#60a5fa",
+            "line-width": isBest ? 6 : 4,
+            "line-opacity": isBest ? 1 : 0.5,
+          },
         });
-      });
 
-      // ── Draw best route on top ─────────────────────────────────────────
-      const bestGeo: Feature<LineString> = {
-        type: "Feature",
-        geometry: data.bestRoute.geometry as LineString,
-        properties: {},
-      };
-      mapInstance.addSource("route-best", { type: "geojson", data: bestGeo });
-      mapInstance.addLayer({
-        id: "route-best",
-        type: "line",
-        source: "route-best",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#a855f7", "line-width": 6, "line-opacity": 1 },
+        // Add click handler for route selection
+        mapInstance.on("click", id, () => {
+          handleRouteSelection(index);
+        });
+
+        // Change cursor on hover
+        mapInstance.on("mouseenter", id, () => {
+          mapInstance.getCanvas().style.cursor = "pointer";
+        });
+        mapInstance.on("mouseleave", id, () => {
+          mapInstance.getCanvas().style.cursor = "";
+        });
       });
 
       // Make sure hazard markers stay on top of route
@@ -454,7 +715,7 @@ export default function Map() {
         mapInstance.moveLayer("hazard-circles");
       }
 
-      // ── Fit map to route ───────────────────────────────────────────────
+      // ── Fit map to best route ──────────────────────────────────────────
       const coords = data.bestRoute.geometry.coordinates as [number, number][];
       const bounds = coords.reduce(
         (b: maplibregl.LngLatBounds, coord) => b.extend(coord),
@@ -462,17 +723,18 @@ export default function Map() {
       );
       mapInstance.fitBounds(bounds, { padding: 80, duration: 800 });
 
-      // ── Route info panel ───────────────────────────────────────────────
+      // ── Route info panel (show best route initially) ──────────────────
+      const bestAnalysis = data.routeAnalyses?.[0] ?? data.analysis;
       setRouteInfo({
         distance: data.bestRoute.distance,
         duration: data.bestRoute.duration,
-        hazardCount: data.analysis?.hazardCount ?? 0,
+        hazardCount: bestAnalysis?.hazardCount ?? 0,
       });
 
       // ── Warning for hazards on route ───────────────────────────────────
-      const hCount = data.analysis?.hazardCount ?? 0;
+      const hCount = bestAnalysis?.hazardCount ?? 0;
       if (hCount > 0) {
-        const breakdown = data.analysis?.typeBreakdown ?? {};
+        const breakdown = bestAnalysis?.typeBreakdown ?? {};
         const topType = Object.keys(breakdown).sort(
           (a, b) => breakdown[b] - breakdown[a]
         )[0];
@@ -481,8 +743,8 @@ export default function Map() {
         );
       }
     } catch (err) {
-      console.error("[Map] Route fetch failed:", err);
-      setWarning("❌ Could not fetch route. Check your connection.");
+      console.error("Route error:", err);
+      setWarning("❌ Could not find route. Try different locations.");
     } finally {
       setIsLoadingRoute(false);
     }
@@ -492,6 +754,424 @@ export default function Map() {
   const handleReportSuccess = () => {
     loadHazards();
   };
+
+  // ── Navigation Functions ──────────────────────────────────────────────────
+  
+  // Start navigation mode
+  const startNavigation = useCallback(() => {
+    if (!allRoutesData || !end) return;
+    
+    const selectedRoute = allRoutesData.allRoutes[selectedRouteIndex];
+    if (!selectedRoute.legs || selectedRoute.legs.length === 0) {
+      setWarning("❌ Navigation data unavailable for this route");
+      return;
+    }
+
+    const steps = selectedRoute.legs[0].steps;
+    const coordinates = selectedRoute.geometry.coordinates as [number, number][];
+    notifiedHazardIds.current.clear();
+
+    setNavigation({
+      isActive: true,
+      currentStepIndex: 0,
+      distanceToNextTurn: steps[0]?.distance || 0,
+      bearing: 0,
+      routeCoordinates: coordinates,
+      steps,
+      hazardsOnRoute: allRoutesData.routeHazards?.[selectedRouteIndex] ?? allRoutesData.hazardsOnRoute ?? [],
+      announcedDistances: new Set(),
+      announcedHazards: new Set(),
+    });
+
+    // GPS error handler with auto-reconnect
+    const handleGPSError = (error: GeolocationPositionError) => {
+      // Safely log error details - avoid logging the full object
+      const errorCode = error?.code;
+      const errorMsg = error?.message || 'unknown';
+      console.error(`GPS error - Code: ${errorCode}, Message: ${errorMsg}`);
+      
+      let userMsg = "GPS unavailable. ";
+      
+      // Handle case where error object might be malformed
+      if (typeof errorCode === 'undefined' || errorCode === null) {
+        userMsg += "An unknown error occurred. Please check browser permissions.";
+        setWarning(`❌ ${userMsg}`);
+        exitNavigation();
+      } else {
+        switch (errorCode) {
+          case 1: // PERMISSION_DENIED
+            userMsg += "Please enable location permissions in your browser settings.";
+            setWarning(`❌ ${userMsg}`);
+            exitNavigation();
+            break;
+          case 2: // POSITION_UNAVAILABLE
+            userMsg += "Location information is unavailable. Are you indoors?";
+            setWarning(`❌ ${userMsg}`);
+            exitNavigation();
+            break;
+          case 3: // TIMEOUT
+            userMsg += "Location request timed out. Reconnecting...";
+            setWarning(`⚠️ ${userMsg}`);
+            // Immediately restart GPS watch on timeout
+            if (gpsWatchIdRef.current) {
+              navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+            }
+            // Retry after a short delay
+            setTimeout(() => {
+              if (navigation.isActive) {
+                const newWatchId = navigator.geolocation.watchPosition(
+                  handleNavigationPosition,
+                  handleGPSError, // Recursively reuse this handler
+                  {
+                    enableHighAccuracy: true,
+                    maximumAge: 1000,
+                    timeout: 10000,
+                  }
+                );
+                gpsWatchIdRef.current = newWatchId;
+                setWarning("🔄 Reconnecting to GPS...");
+              }
+            }, 1000); // Retry after 1 second
+            break;
+          default:
+            userMsg += `Error code ${errorCode}`;
+            setWarning(`❌ ${userMsg}`);
+            exitNavigation();
+        }
+      }
+    };
+
+    // Start high-accuracy GPS tracking
+    if (navigator.geolocation) {
+      const watchId = navigator.geolocation.watchPosition(
+        handleNavigationPosition,
+        handleGPSError,
+        {
+          enableHighAccuracy: true,
+          maximumAge: 1000,
+          timeout: 10000,
+        }
+      );
+      gpsWatchIdRef.current = watchId;
+    } else {
+      setWarning("❌ Geolocation is not supported by your browser");
+      exitNavigation();
+      return;
+    }
+
+    // Lock map to follow mode
+    if (map.current && position) {
+      map.current.flyTo({
+        center: [position.lng, position.lat],
+        zoom: 17,
+        pitch: 45,
+        duration: 1000,
+      });
+    }
+  }, [allRoutesData, selectedRouteIndex, end, position]);
+
+  // Calculate progress along route
+  const updateRouteProgress = useCallback((lng: number, lat: number) => {
+    if (!navigation.isActive || navigation.routeCoordinates.length === 0) return;
+
+    const currentPos = turf.point([lng, lat]);
+    const routeLine = turf.lineString(navigation.routeCoordinates);
+    
+    // Find nearest point on route
+    const snapped = turf.nearestPointOnLine(routeLine, currentPos);
+    const currentStep = navigation.steps[navigation.currentStepIndex];
+    
+    // Calculate distance to next maneuver
+    const maneuverPoint = currentStep?.maneuver.location;
+    if (maneuverPoint) {
+      const distToManeuver = turf.distance(currentPos, turf.point(maneuverPoint), { units: "meters" });
+      
+      setNavigation(prev => ({
+        ...prev,
+        distanceToNextTurn: distToManeuver,
+      }));
+
+      // Check for distance-based announcements (500m, 200m, 100m, 50m)
+      const nextDistance = getNextAnnouncementDistance(distToManeuver, navigation.announcedDistances);
+      if (nextDistance !== null && currentStep) {
+        const instruction = formatTurnInstruction(currentStep, nextDistance, true);
+        sendNotification("Navigation", instruction);
+        
+        // Mark this distance as announced
+        setNavigation(prev => ({
+          ...prev,
+          announcedDistances: new Set([...prev.announcedDistances, nextDistance]),
+        }));
+      }
+
+      const nearbyNavHazard = navigation.hazardsOnRoute.find((hazard) => {
+        const hazardId = String(hazard.id ?? hazard._id ?? `${hazard.type}-${hazard.lat}-${hazard.lng}`);
+        return (
+          !navigation.announcedHazards.has(hazardId) &&
+          haversineDistance(lat, lng, hazard.lat, hazard.lng) < PROXIMITY_WARNING_RADIUS
+        );
+      });
+
+      if (nearbyNavHazard) {
+        const hazardId = String(
+          nearbyNavHazard.id ??
+            nearbyNavHazard._id ??
+            `${nearbyNavHazard.type}-${nearbyNavHazard.lat}-${nearbyNavHazard.lng}`
+        );
+        const hazardDistance = haversineDistance(lat, lng, nearbyNavHazard.lat, nearbyNavHazard.lng);
+        const hazardMessage = `${
+          String(nearbyNavHazard.type ?? "hazard").charAt(0).toUpperCase() +
+          String(nearbyNavHazard.type ?? "hazard").slice(1)
+        } reported ahead in ${Math.round(hazardDistance)} meters`;
+
+        sendNotification("Hazard Ahead", hazardMessage);
+        setWarning(`⚠️ ${hazardMessage}`);
+        if (typeof nearbyNavHazard.id === "number") {
+          notifiedHazardIds.current.add(nearbyNavHazard.id);
+        }
+
+        setNavigation((prev) => ({
+          ...prev,
+          announcedHazards: new Set([...prev.announcedHazards, hazardId]),
+        }));
+      }
+
+      // Move to next step if close enough (within 20m)
+      if (distToManeuver < 20 && navigation.currentStepIndex < navigation.steps.length - 1) {
+        const nextStep = navigation.steps[navigation.currentStepIndex + 1];
+        
+        setNavigation(prev => ({
+          ...prev,
+          currentStepIndex: prev.currentStepIndex + 1,
+          distanceToNextTurn: nextStep?.distance || 0,
+          announcedDistances: new Set(), // Reset for next turn
+        }));
+        
+        // Announce next instruction
+        if (nextStep) {
+          const nextInstruction = formatTurnInstruction(nextStep, nextStep.distance, false);
+          sendNotification("Next Turn", nextInstruction);
+        }
+      }
+    }
+  }, [navigation, sendNotification]);
+
+  // Check if user deviated from route
+  const checkDeviation = useCallback((lng: number, lat: number) => {
+    if (!navigation.isActive || navigation.routeCoordinates.length === 0 || isReroutingRef.current) return;
+
+    const currentPos = turf.point([lng, lat]);
+    const routeLine = turf.lineString(navigation.routeCoordinates);
+    const snapped = turf.nearestPointOnLine(routeLine, currentPos);
+    
+    // Calculate perpendicular distance from route
+    const distanceFromRoute = turf.distance(currentPos, snapped, { units: "meters" });
+
+    if (distanceFromRoute > 30) {
+      // User is >30m off route - start timer
+      if (!offRouteTimerRef.current) {
+        offRouteTimerRef.current = setTimeout(() => {
+          triggerReroute(lng, lat);
+        }, 5000); // Wait 5 seconds before rerouting
+      }
+    } else {
+      // User is back on route - cancel reroute timer
+      if (offRouteTimerRef.current) {
+        clearTimeout(offRouteTimerRef.current);
+        offRouteTimerRef.current = null;
+      }
+    }
+  }, [navigation]);
+
+  // Handle GPS position updates during navigation
+  const handleNavigationPosition = useCallback((pos: GeolocationPosition) => {
+    const { latitude: lat, longitude: lng } = pos.coords;
+    const currentPos = turf.point([lng, lat]);
+
+    let newBearing = navigation.bearing;
+
+    // Calculate bearing if we have a previous position
+    if (lastPositionRef.current) {
+      const from = turf.point([lastPositionRef.current.lng, lastPositionRef.current.lat]);
+      const to = currentPos;
+      const calculatedBearing = turf.bearing(from, to);
+      
+      // Only update bearing if movement is significant (reduces jitter)
+      const distance = turf.distance(from, to, { units: "meters" });
+      if (distance > 3) { // Only update if moved more than 3 meters
+        newBearing = calculatedBearing;
+        setNavigation(prev => ({ ...prev, bearing: calculatedBearing }));
+      }
+    }
+    lastPositionRef.current = { lat, lng };
+
+    // Update user marker with smooth animation and rotation
+    if (userMarker.current && map.current) {
+      const element = userMarker.current.getElement();
+      
+      // Rotate the arrow to match bearing (bearing is relative to north, 0° = north)
+      const arrow = element.querySelector('.user-location-arrow');
+      if (arrow) {
+        (arrow as HTMLElement).style.transform = `rotate(${newBearing}deg)`;
+        (arrow as HTMLElement).style.transition = 'transform 0.3s ease-out';
+      }
+      
+      // Animate to new position
+      userMarker.current.setLngLat([lng, lat]);
+      
+      // Center map on user (follow mode) with rotation
+      map.current.easeTo({
+        center: [lng, lat],
+        bearing: newBearing, // Rotate map to match travel direction
+        duration: 500,
+      });
+    }
+
+    // Update route progress
+    if (navigation.isActive) {
+      updateRouteProgress(lng, lat);
+    }
+    
+    // Check if off-route
+    if (navigation.isActive) {
+      checkDeviation(lng, lat);
+    }
+  }, [navigation.bearing, navigation.isActive, updateRouteProgress, checkDeviation]);
+
+  // Trigger reroute
+  const triggerReroute = async (lng: number, lat: number) => {
+    if (!end || isReroutingRef.current) return;
+
+    isReroutingRef.current = true;
+    setWarning("🔄 Rerouting...");
+
+    try {
+      const res = await fetch(
+        `${API_URL}/api/route?from=${lng},${lat}&to=${end[0]},${end[1]}`
+      );
+      
+      if (!res.ok) throw new Error("Reroute failed");
+
+      const data = await res.json();
+      
+      // Update route with new data
+      setAllRoutesData(data);
+      setSelectedRouteIndex(0);
+      
+      // Restart navigation with new route
+      const newRoute = data.allRoutes[0];
+      if (newRoute.legs && newRoute.legs.length > 0) {
+        const steps = newRoute.legs[0].steps;
+        const coordinates = newRoute.geometry.coordinates as [number, number][];
+
+        setNavigation({
+          isActive: true,
+          currentStepIndex: 0,
+          distanceToNextTurn: steps[0]?.distance || 0,
+          bearing: navigation.bearing,
+          routeCoordinates: coordinates,
+          steps,
+          hazardsOnRoute: data.routeHazards?.[0] ?? data.hazardsOnRoute ?? [],
+          announcedDistances: new Set(),
+          announcedHazards: new Set(),
+        });
+
+        // Redraw route on map
+        if (map.current) {
+          // Clean up old routes
+          for (let i = 0; i < 10; i++) {
+            const id = `route-${i}`;
+            if (map.current.getLayer(id)) map.current.removeLayer(id);
+            if (map.current.getSource(id)) map.current.removeSource(id);
+          }
+
+          // Draw new route
+          const id = "route-0";
+          const geojson: Feature<LineString> = {
+            type: "Feature",
+            geometry: newRoute.geometry,
+            properties: { routeIndex: 0, isBest: true },
+          };
+          map.current.addSource(id, { type: "geojson", data: geojson });
+          map.current.addLayer({
+            id,
+            type: "line",
+            source: id,
+            layout: { "line-join": "round", "line-cap": "round" },
+            paint: {
+              "line-color": "#a855f7",
+              "line-width": 7,
+              "line-opacity": 1,
+            },
+          });
+        }
+
+        setWarning(null);
+      }
+    } catch (error) {
+      console.error("Reroute error:", error);
+      setWarning("❌ Reroute failed. Continue to destination.");
+    } finally {
+      isReroutingRef.current = false;
+      if (offRouteTimerRef.current) {
+        clearTimeout(offRouteTimerRef.current);
+        offRouteTimerRef.current = null;
+      }
+    }
+  };
+
+  // Exit navigation
+  const exitNavigation = useCallback(() => {
+    // Stop GPS tracking
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      gpsWatchIdRef.current = null;
+    }
+
+    // Clear timers
+    if (offRouteTimerRef.current) {
+      clearTimeout(offRouteTimerRef.current);
+      offRouteTimerRef.current = null;
+    }
+
+    // Reset navigation state
+    setNavigation({
+      isActive: false,
+      currentStepIndex: 0,
+      distanceToNextTurn: 0,
+      bearing: 0,
+      routeCoordinates: [],
+      steps: [],
+      hazardsOnRoute: [],
+      announcedDistances: new Set(),
+      announcedHazards: new Set(),
+    });
+    notifiedHazardIds.current.clear();
+
+    isReroutingRef.current = false;
+    lastPositionRef.current = null;
+
+    // Reset map view
+    if (map.current) {
+      map.current.easeTo({
+        pitch: 0,
+        bearing: 0,
+        duration: 500,
+      });
+    }
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (gpsWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      }
+      if (offRouteTimerRef.current) {
+        clearTimeout(offRouteTimerRef.current);
+      }
+    };
+  }, []);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -554,6 +1234,14 @@ export default function Map() {
               className="search-panel__input"
               autoComplete="off"
             />
+            <button
+              className={`search-panel__loc-btn ${isClickToSelectMode ? 'active' : ''}`}
+              onClick={() => setIsClickToSelectMode(!isClickToSelectMode)}
+              title={isClickToSelectMode ? "Click mode active - click map to set destination" : "Enable click-to-select destination"}
+              aria-label="Toggle click-to-select mode"
+            >
+              {isClickToSelectMode ? '🎯' : '📍'}
+            </button>
           </div>
           {toResults.length > 0 && (
             <div className="search-panel__results">
@@ -585,18 +1273,54 @@ export default function Map() {
       {/* ── Map Container ──────────────────────────────────────────────── */}
       <div
         ref={mapContainer}
-        style={{ width: "100%", height: "100vh" }}
+        style={{ 
+          width: "100%", 
+          height: "100vh",
+          cursor: isClickToSelectMode ? "crosshair" : "default"
+        }}
         aria-label="Interactive road map"
         role="application"
       />
 
+      {/* ── Navigation Panel ───────────────────────────────────────────── */}
+      {navigation.isActive && navigation.steps.length > 0 && (
+        <NavigationPanel
+          currentStep={navigation.steps[navigation.currentStepIndex] || null}
+          distanceToTurn={navigation.distanceToNextTurn}
+          totalDistance={allRoutesData?.allRoutes[selectedRouteIndex]?.distance || 0}
+          totalDuration={allRoutesData?.allRoutes[selectedRouteIndex]?.duration || 0}
+          onExit={exitNavigation}
+        />
+      )}
+
       {/* ── Route Panel ────────────────────────────────────────────────── */}
-      <RoutePanel
-        distance={routeInfo?.distance ?? null}
-        duration={routeInfo?.duration ?? null}
-        hazardCount={routeInfo?.hazardCount ?? null}
-        onClose={() => setRouteInfo(null)}
-      />
+      {!navigation.isActive && (
+        <RoutePanel
+          distance={routeInfo?.distance ?? null}
+          duration={routeInfo?.duration ?? null}
+          hazardCount={routeInfo?.hazardCount ?? null}
+          onClose={() => {
+            setRouteInfo(null);
+            setAllRoutesData(null);
+            setSelectedRouteIndex(0);
+          }}
+          onStartNavigation={startNavigation}
+          canNavigate={!!allRoutesData && !!end}
+        />
+      )}
+
+      {/* ── Route Selector ─────────────────────────────────────────────── */}
+      {!navigation.isActive && allRoutesData && allRoutesData.allRoutes.length > 1 && (
+        <RouteSelector
+          routes={allRoutesData.allRoutes}
+          selectedIndex={selectedRouteIndex}
+          onSelect={handleRouteSelection}
+          onClose={() => {
+            // Keep routes visible but hide selector
+            setAllRoutesData(null);
+          }}
+        />
+      )}
 
       {/* ── Dashboard / profile link (top-right) ─────────────────────── */}
       {user && (

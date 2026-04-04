@@ -26,8 +26,10 @@ function isNear(point, hazard, threshold = 100) {
 }
 
 function getBoundingBox(coords) {
-	let minLat = Infinity, maxLat = -Infinity;
-	let minLng = Infinity, maxLng = -Infinity;
+	let minLat = Infinity,
+		maxLat = -Infinity;
+	let minLng = Infinity,
+		maxLng = -Infinity;
 
 	coords.forEach(([lng, lat]) => {
 		minLat = Math.min(minLat, lat);
@@ -40,17 +42,14 @@ function getBoundingBox(coords) {
 }
 
 exports.getRoute = async (from, to) => {
-	const url = `https://router.project-osrm.org/route/v1/driving/${from};${to}?alternatives=true&overview=full&geometries=geojson`;
+	const url = `https://router.project-osrm.org/route/v1/driving/${from};${to}?alternatives=true&overview=full&geometries=geojson&steps=true&annotations=true`;
 
 	console.log("[routing] OSRM request:", url);
 
 	const response = await axios.get(url);
 	const routes = response.data.routes;
 
-	let bestRoute = null;
-	let bestScore = Infinity;
-	let bestDetails = null;
-	let bestHazardsOnRoute = [];
+	const rankedRoutes = [];
 
 	for (const route of routes) {
 		const coords = route.geometry.coordinates;
@@ -66,16 +65,20 @@ exports.getRoute = async (from, to) => {
 		const hazards = hazardRes.rows;
 
 		let hazardCount = 0;
+		let severitySum = 0;
 		let penalty = 0;
 		let typeBreakdown = {};
 		const hazardsOnRoute = [];
 
 		hazards.forEach((h) => {
-			for (let i = 0; i < coords.length; i += 5) {
+			// Sample every 3 points for better hazard matching on route geometry.
+			for (let i = 0; i < coords.length; i += 3) {
 				if (isNear(coords[i], h)) {
 					// Use severity for penalty (works with existing schema)
-					const weight = (h.severity || 1) * 30;
+					const severity = h.severity || 1;
+					const weight = severity * 30;
 					penalty += weight;
+					severitySum += severity;
 					hazardCount++;
 					typeBreakdown[h.type] = (typeBreakdown[h.type] || 0) + 1;
 
@@ -88,24 +91,75 @@ exports.getRoute = async (from, to) => {
 			}
 		});
 
-		const score = route.duration + penalty;
-
-		if (score < bestScore) {
-			bestScore = score;
-			bestRoute = route;
-			bestHazardsOnRoute = hazardsOnRoute;
-			bestDetails = {
-				score,
+		rankedRoutes.push({
+			route,
+			analysis: {
 				hazardCount,
+				severitySum,
 				penalty,
 				typeBreakdown,
-			};
-		}
+			},
+			hazardsOnRoute,
+		});
 	}
+
+	const durations = rankedRoutes.map((r) => r.route.duration);
+	const distances = rankedRoutes.map((r) => r.route.distance);
+	const hazardMetrics = rankedRoutes.map(
+		(r) => r.analysis.hazardCount * 2 + r.analysis.severitySum * 3,
+	);
+
+	const minDuration = Math.min(...durations);
+	const maxDuration = Math.max(...durations);
+	const minDistance = Math.min(...distances);
+	const maxDistance = Math.max(...distances);
+	const minHazardMetric = Math.min(...hazardMetrics);
+	const maxHazardMetric = Math.max(...hazardMetrics);
+
+	const normalize = (value, min, max) => (max === min ? 0 : (value - min) / (max - min));
+
+	// Balanced score: hazards + time + distance
+	// Hazards still weighted highest, but duration/distance are always included.
+	const HAZARD_WEIGHT = 0.55;
+	const TIME_WEIGHT = 0.30;
+	const DISTANCE_WEIGHT = 0.15;
+
+	rankedRoutes.forEach((r) => {
+		const hazardMetric = r.analysis.hazardCount * 2 + r.analysis.severitySum * 3;
+		const normalizedHazard = normalize(hazardMetric, minHazardMetric, maxHazardMetric);
+		const normalizedTime = normalize(r.route.duration, minDuration, maxDuration);
+		const normalizedDistance = normalize(r.route.distance, minDistance, maxDistance);
+
+		r.analysis.score =
+			HAZARD_WEIGHT * normalizedHazard +
+			TIME_WEIGHT * normalizedTime +
+			DISTANCE_WEIGHT * normalizedDistance;
+	});
+
+	rankedRoutes.sort((a, b) => {
+		if (a.analysis.score !== b.analysis.score) {
+			return a.analysis.score - b.analysis.score;
+		}
+		if (a.analysis.hazardCount !== b.analysis.hazardCount) {
+			return a.analysis.hazardCount - b.analysis.hazardCount;
+		}
+		if (a.route.duration !== b.route.duration) {
+			return a.route.duration - b.route.duration;
+		}
+		return a.route.distance - b.route.distance;
+	});
+
+	const best = rankedRoutes[0];
+	const bestRoute = best?.route ?? null;
+	const bestDetails = best?.analysis ?? null;
+	const bestHazardsOnRoute = best?.hazardsOnRoute ?? [];
 
 	return {
 		bestRoute,
-		allRoutes: routes,
+		// Keep allRoutes ordered with safest route first so frontend "index 0 = recommended" remains correct.
+		allRoutes: rankedRoutes.map((r) => r.route),
+		routeAnalyses: rankedRoutes.map((r) => r.analysis),
+		routeHazards: rankedRoutes.map((r) => r.hazardsOnRoute),
 		analysis: bestDetails,
 		hazardsOnRoute: bestHazardsOnRoute,
 	};
