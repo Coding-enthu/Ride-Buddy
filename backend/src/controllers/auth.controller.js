@@ -43,8 +43,8 @@ exports.register = async (req, res) => {
     );
 
     const user = result.rows[0];
-    const token = generateToken(user);
-    return res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email } });
+    const token = generateToken(user); // role = 'user' by default
+    return res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role || 'user' } });
   } catch (err) {
     console.error("[Auth] Register error:", err.message);
     return res.status(500).json({ error: "Registration failed. Please try again." });
@@ -64,7 +64,7 @@ exports.login = async (req, res) => {
 
   try {
     const result = await pool.query(
-      "SELECT id, name, email, password_hash FROM users WHERE email = $1",
+      "SELECT id, name, email, password_hash, role FROM users WHERE email = $1",
       [email.toLowerCase()]
     );
 
@@ -79,8 +79,8 @@ exports.login = async (req, res) => {
       return res.status(401).json({ error: "Incorrect email or password." });
     }
 
-    const token = generateToken(user);
-    return res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+    const token = generateToken(user); // includes role in JWT
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role || 'user' } });
   } catch (err) {
     console.error("[Auth] Login error:", err.message);
     return res.status(500).json({ error: "Login failed. Please try again." });
@@ -94,7 +94,7 @@ exports.login = async (req, res) => {
 exports.getMe = async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, name, email, created_at FROM users WHERE id = $1",
+      "SELECT id, name, email, role, created_at FROM users WHERE id = $1",
       [req.user.userId]
     );
     if (result.rowCount === 0) return res.status(404).json({ error: "User not found." });
