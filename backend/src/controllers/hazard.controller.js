@@ -4,10 +4,9 @@
 //   - getHazards and getNearbyHazards are UNCHANGED
 
 const hazardService = require("../services/hazard.service.js");
-const userService = require("../services/user.service.js");
 const geminiService = require("../services/gemini.service.js");
 
-const GEMINI_MIN_CONFIDENCE = 0.65;
+const GEMINI_MIN_CONFIDENCE = 0.50; // permissive — real-world photos vary in quality
 const DUPLICATE_RADIUS_METERS = 30;
 
 /**
