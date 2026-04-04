@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import maplibregl, { Map as MapLibreMap, GeoJSONSource } from "maplibre-gl";
 import type { Feature, LineString, FeatureCollection, Point } from "geojson";
+import Link from "next/link";
 
 import { useUserLocation } from "../_hooks/useUserLocation";
 import { useNotifications } from "../_hooks/useNotifications";
 import { useHazardCache, type CachedHazard } from "../_hooks/useHazardCache";
+import { useAuth } from "../_hooks/useAuth"; // NEW
 
 import ReportButton from "./ReportButton";
 import BottomSheet from "./BottomSheet";
@@ -85,17 +87,32 @@ export default function Map() {
   const { position } = useUserLocation();
   const { permission, requestPermission, sendNotification } = useNotifications();
   const { getCache, setCache } = useHazardCache();
+  const { user, idToken } = useAuth(); // NEW
 
   // ── Map Init ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapContainer.current || map.current || !apiKey) return;
 
+    // MapLibre v5 calls migrateProjection() on every style load.
+    // MapTiler styles omit the "projection" field, causing:
+    //   TypeError: Cannot read properties of undefined (reading 'projection')
+    // Fix: initialise without a style, then call setStyle() with transformStyle
+    // to inject the missing field before MapLibre processes it.
     map.current = new maplibregl.Map({
       container: mapContainer.current,
-      style: `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${apiKey}`,
       center: [88.3639, 22.5726],
       zoom: 13,
     });
+
+    map.current.setStyle(
+      `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${apiKey}`,
+      {
+        transformStyle: (_prev, next) => ({
+          ...next,
+          projection: next.projection ?? { type: "mercator" },
+        }),
+      }
+    );
 
     map.current.addControl(new maplibregl.NavigationControl(), "top-right");
     map.current.addControl(new maplibregl.FullscreenControl(), "top-right");
@@ -103,6 +120,14 @@ export default function Map() {
     map.current.on("load", () => {
       initHazardLayer();
       setIsMapLoaded(true);
+    });
+
+    // Suppress "Image ' ' could not be loaded" noise from MapTiler sprite mismatches
+    map.current.on("styleimagemissing", (e: { id: string }) => {
+      if (!e.id || e.id.trim() === "") return; // blank id — skip silently
+      // Add a 1×1 transparent ImageData so MapLibre stops retrying the missing image
+      const emptyImage: ImageData = new ImageData(new Uint8ClampedArray(4), 1, 1);
+      map.current?.addImage(e.id, emptyImage);
     });
 
     return () => {
@@ -370,13 +395,23 @@ export default function Map() {
       const mapInstance = map.current;
 
       // ── Clean up old route layers ──────────────────────────────────────
-      const layers = mapInstance.getStyle().layers || [];
-      layers.forEach((layer) => {
-        if (layer.id.startsWith("route")) {
-          if (mapInstance.getLayer(layer.id)) mapInstance.removeLayer(layer.id);
-          if (mapInstance.getSource(layer.id)) mapInstance.removeSource(layer.id);
-        }
-      });
+      // Guard: only call getStyle() when the style is fully loaded to avoid
+      // the "Cannot read properties of undefined (reading 'projection')" crash
+      if (mapInstance.isStyleLoaded()) {
+        const layers = mapInstance.getStyle().layers || [];
+        layers.forEach((layer) => {
+          if (layer.id.startsWith("route")) {
+            if (mapInstance.getLayer(layer.id)) mapInstance.removeLayer(layer.id);
+            if (mapInstance.getSource(layer.id)) mapInstance.removeSource(layer.id);
+          }
+        });
+      } else {
+        // Style not ready — remove by known names only (safe fallback)
+        ["route-best", "route-alt-0", "route-alt-1", "route-alt-2"].forEach((id) => {
+          if (mapInstance.getLayer(id)) mapInstance.removeLayer(id);
+          if (mapInstance.getSource(id)) mapInstance.removeSource(id);
+        });
+      }
 
       // ── Draw alternative routes (faded) ───────────────────────────────
       data.allRoutes?.forEach((route: { geometry: LineString }, index: number) => {
@@ -563,6 +598,15 @@ export default function Map() {
         onClose={() => setRouteInfo(null)}
       />
 
+      {/* ── Dashboard / profile link (top-right) ─────────────────────── */}
+      {user && (
+        <Link href="/dashboard" className="map-dashboard-btn" aria-label="Dashboard">
+          <span className="map-dashboard-btn__avatar">
+            {(user.name || "U")[0].toUpperCase()}
+          </span>
+        </Link>
+      )}
+
       {/* ── Floating Report Button ─────────────────────────────────────── */}
       <ReportButton
         onClick={() => {
@@ -579,6 +623,7 @@ export default function Map() {
         userLng={position?.lng ?? null}
         apiUrl={API_URL}
         onSuccess={handleReportSuccess}
+        idToken={idToken} // NEW — passes auth token for protected POST
       />
     </div>
   );
