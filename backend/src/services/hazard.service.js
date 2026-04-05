@@ -9,13 +9,45 @@ const pool = require("../config/db.js");
  * Insert a hazard. user_id, confidence and verified are optional.
  */
 exports.createHazard = async ({ type, lat, lng, severity, user_id, confidence }) => {
-  const result = await pool.query(
-    `INSERT INTO hazards(type, lat, lng, severity, user_id, confidence, verified)
-     VALUES($1, $2, $3, $4, $5, $6, false)
-     RETURNING *`,
-    [type, lat, lng, severity || 1, user_id ?? null, confidence ?? null]
-  );
-  return result.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const hazardResult = await client.query(
+      `INSERT INTO hazards(type, lat, lng, severity, user_id, confidence, verified)
+       VALUES($1, $2, $3, $4, $5, $6, false)
+       RETURNING *`,
+      [type, lat, lng, severity || 1, user_id ?? null, confidence ?? null]
+    );
+
+    let hazardReportsCount = null;
+    if (user_id != null) {
+      try {
+        const countResult = await client.query(
+          `UPDATE users
+           SET hazard_reports_count = COALESCE(hazard_reports_count, 0) + 1
+           WHERE id = $1
+           RETURNING hazard_reports_count`,
+          [user_id]
+        );
+        hazardReportsCount = countResult.rows[0]?.hazard_reports_count ?? null;
+      } catch (err) {
+        // Backward compatibility: allow hazard creation even if the new
+        // hazard_reports_count column migration has not been applied yet.
+        if (err?.code !== "42703") {
+          throw err;
+        }
+      }
+    }
+
+    await client.query("COMMIT");
+    return { ...hazardResult.rows[0], hazard_reports_count: hazardReportsCount };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 /**

@@ -3,8 +3,11 @@
 interface RoutePanelProps {
   distance: number | null;
   duration: number | null;
+  originalDuration: number | null;
   hazardCount: number | null;
   onClose: () => void;
+  onStartNavigation?: () => void;
+  canNavigate?: boolean;
 }
 
 function formatDistance(meters: number): string {
@@ -25,8 +28,11 @@ function formatDuration(seconds: number): string {
 export default function RoutePanel({
   distance,
   duration,
+  originalDuration,
   hazardCount,
   onClose,
+  onStartNavigation,
+  canNavigate = false,
 }: RoutePanelProps) {
   if (distance === null || duration === null) return null;
 
@@ -48,7 +54,12 @@ export default function RoutePanel({
           <span className="route-panel__stat-icon">🕐</span>
           <div>
             <div className="route-panel__stat-value">{formatDuration(duration)}</div>
-            <div className="route-panel__stat-label">Duration</div>
+            <div className="route-panel__stat-label">Adjusted Duration</div>
+            {originalDuration !== null && originalDuration !== duration && (
+              <div className="route-panel__stat-subtext">
+                Base: {formatDuration(originalDuration)}
+              </div>
+            )}
           </div>
         </div>
 
@@ -75,6 +86,16 @@ export default function RoutePanel({
           </>
         )}
       </div>
+
+      {canNavigate && onStartNavigation && (
+        <button
+          className="route-panel__nav-btn"
+          onClick={onStartNavigation}
+          aria-label="Start turn-by-turn navigation"
+        >
+          🧭 Start Navigation
+        </button>
+      )}
     </div>
   );
 }
