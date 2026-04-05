@@ -14,6 +14,12 @@ interface DashboardData {
   user_id: number;
   name: string;
   total_reports: number;
+  achievement?: {
+    current: number | null;
+    next: number | null;
+    reached: number[];
+    title: string | null;
+  };
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
@@ -99,19 +105,37 @@ function DashboardContent() {
         )}
 
         {data && (
-          <div className="dashboard-stats">
-            <div className="dashboard-stat-card dashboard-stat-card--accent">
-              <div className="dashboard-stat-card__icon">📍</div>
-              <div className="dashboard-stat-card__value">{data.total_reports}</div>
-              <div className="dashboard-stat-card__label">Hazards Reported</div>
+          <>
+            <div className="dashboard-stats">
+              <div className="dashboard-stat-card dashboard-stat-card--accent">
+                <div className="dashboard-stat-card__icon">📍</div>
+                <div className="dashboard-stat-card__value">{data.total_reports}</div>
+                <div className="dashboard-stat-card__label">Hazards Reported</div>
+              </div>
+
+              <div className="dashboard-stat-card">
+                <div className="dashboard-stat-card__icon">🆔</div>
+                <div className="dashboard-stat-card__value">#{data.user_id}</div>
+                <div className="dashboard-stat-card__label">Member ID</div>
+              </div>
             </div>
 
-            <div className="dashboard-stat-card">
-              <div className="dashboard-stat-card__icon">🆔</div>
-              <div className="dashboard-stat-card__value">#{data.user_id}</div>
-              <div className="dashboard-stat-card__label">Member ID</div>
+            <div className="dashboard-achievement">
+              <div className="dashboard-achievement__icon">
+                {data.achievement?.current ? "🏆" : "🎯"}
+              </div>
+              <div className="dashboard-achievement__content">
+                <p className="dashboard-achievement__title">
+                  {data.achievement?.title || "First milestone at 50 reports"}
+                </p>
+                <p className="dashboard-achievement__sub">
+                  {data.achievement?.next
+                    ? `${Math.max(data.achievement.next - data.total_reports, 0)} more reports to reach ${data.achievement.next}`
+                    : "Top milestone reached — amazing contribution!"}
+                </p>
+              </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* CTA Banner */}

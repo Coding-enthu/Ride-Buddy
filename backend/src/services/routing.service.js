@@ -67,6 +67,7 @@ exports.getRoute = async (from, to) => {
 		let hazardCount = 0;
 		let severitySum = 0;
 		let penalty = 0;
+		let estimatedDelaySeconds = 0;
 		let typeBreakdown = {};
 		const hazardsOnRoute = [];
 
@@ -79,6 +80,7 @@ exports.getRoute = async (from, to) => {
 					const weight = severity * 30;
 					penalty += weight;
 					severitySum += severity;
+					estimatedDelaySeconds += severity * 40;
 					hazardCount++;
 					typeBreakdown[h.type] = (typeBreakdown[h.type] || 0) + 1;
 
@@ -97,13 +99,15 @@ exports.getRoute = async (from, to) => {
 				hazardCount,
 				severitySum,
 				penalty,
+				estimatedDelaySeconds,
+				adjustedDuration: route.duration + estimatedDelaySeconds,
 				typeBreakdown,
 			},
 			hazardsOnRoute,
 		});
 	}
 
-	const durations = rankedRoutes.map((r) => r.route.duration);
+	const durations = rankedRoutes.map((r) => r.analysis.adjustedDuration);
 	const distances = rankedRoutes.map((r) => r.route.distance);
 	const hazardMetrics = rankedRoutes.map(
 		(r) => r.analysis.hazardCount * 2 + r.analysis.severitySum * 3,
@@ -127,7 +131,7 @@ exports.getRoute = async (from, to) => {
 	rankedRoutes.forEach((r) => {
 		const hazardMetric = r.analysis.hazardCount * 2 + r.analysis.severitySum * 3;
 		const normalizedHazard = normalize(hazardMetric, minHazardMetric, maxHazardMetric);
-		const normalizedTime = normalize(r.route.duration, minDuration, maxDuration);
+		const normalizedTime = normalize(r.analysis.adjustedDuration, minDuration, maxDuration);
 		const normalizedDistance = normalize(r.route.distance, minDistance, maxDistance);
 
 		r.analysis.score =

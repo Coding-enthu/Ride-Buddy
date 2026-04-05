@@ -12,6 +12,7 @@ interface NavigationPanelProps {
 	distanceToTurn: number;
 	totalDistance: number;
 	totalDuration: number;
+	originalTotalDuration: number;
 	onExit: () => void;
 }
 
@@ -71,6 +72,7 @@ export default function NavigationPanel({
 	distanceToTurn,
 	totalDistance,
 	totalDuration,
+	originalTotalDuration,
 	onExit,
 }: NavigationPanelProps) {
 	if (!currentStep) return null;
@@ -99,6 +101,11 @@ export default function NavigationPanel({
 					<span className="navigation-panel__eta-label">
 						· {formatDistance(totalDistance)}
 					</span>
+					{originalTotalDuration !== totalDuration && (
+						<span className="navigation-panel__eta-label">
+							(base {formatDuration(originalTotalDuration)})
+						</span>
+					)}
 				</div>
 				<button
 					className="navigation-panel__exit"
