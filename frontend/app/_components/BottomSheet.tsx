@@ -94,6 +94,10 @@ export default function BottomSheet({
   };
 
   const handleSubmit = async () => {
+    console.log("[BottomSheet] handleSubmit called");
+    console.log("[BottomSheet] userLat:", userLat, "userLng:", userLng);
+    console.log("[BottomSheet] idToken:", idToken ? "present" : "missing");
+
     if (!userLat || !userLng) {
       setError("Unable to get your location. Please enable GPS and try again.");
       return;
@@ -109,39 +113,50 @@ export default function BottomSheet({
     try {
       // Step 1: encode image
       setSubmitStatus("validating");
+      console.log("[BottomSheet] Encoding image...");
       const imageBase64 = await fileToBase64(imageFile);
       const imageMimeType = imageFile.type || "image/jpeg";
+      console.log("[BottomSheet] Image encoded, size:", imageBase64.length, "type:", imageMimeType);
 
       // Step 2: submit to backend (Gemini validation happens server-side)
       setSubmitStatus("submitting");
+      console.log("[BottomSheet] Submitting to:", `${apiUrl}/api/hazards`);
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
       if (idToken) {
         headers["Authorization"] = `Bearer ${idToken}`;
+        console.log("[BottomSheet] Auth header added");
       }
+
+      const payload = {
+        type,
+        lat: userLat,
+        lng: userLng,
+        severity,
+        imageBase64,
+        imageMimeType,
+      };
+      console.log("[BottomSheet] Payload:", { ...payload, imageBase64: `[${imageBase64.length} chars]` });
 
       const res = await fetch(`${apiUrl}/api/hazards`, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          type,
-          lat: userLat,
-          lng: userLng,
-          severity,
-          imageBase64,
-          imageMimeType,
-        }),
+        body: JSON.stringify(payload),
       });
 
+      console.log("[BottomSheet] Response status:", res.status);
       const responseData = await res.json();
+      console.log("[BottomSheet] Response data:", responseData);
 
       if (!res.ok) {
         // Surface meaningful backend error messages
+        console.error("[BottomSheet] Request failed:", responseData);
         throw new Error(responseData.error || `Server error: ${res.status}`);
       }
 
+      console.log("[BottomSheet] ✅ Hazard submitted successfully!");
       setSubmitStatus("success");
       setTimeout(() => {
         reset();
@@ -149,6 +164,7 @@ export default function BottomSheet({
         onClose();
       }, 1500);
     } catch (err: unknown) {
+      console.error("[BottomSheet] ❌ Submit error:", err);
       setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
       setSubmitStatus("error");
     } finally {

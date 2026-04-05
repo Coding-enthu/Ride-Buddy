@@ -9,9 +9,11 @@ const pool = require("../config/db.js");
  * Insert a hazard. user_id, confidence and verified are optional.
  */
 exports.createHazard = async ({ type, lat, lng, severity, user_id, confidence }) => {
+  console.log("[HazardService] createHazard called with:", { type, lat, lng, severity, user_id, confidence });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    console.log("[HazardService] Transaction started");
 
     const hazardResult = await client.query(
       `INSERT INTO hazards(type, lat, lng, severity, user_id, confidence, verified)
@@ -19,7 +21,11 @@ exports.createHazard = async ({ type, lat, lng, severity, user_id, confidence })
        RETURNING *`,
       [type, lat, lng, severity || 1, user_id ?? null, confidence ?? null]
     );
+    console.log("[HazardService] Hazard inserted, ID:", hazardResult.rows[0]?.id);
 
+    // NOTE: hazard_reports_count column doesn't exist yet - skipping user stats update
+    // TODO: Add migration to create this column if needed
+    /*
     let hazardReportsCount = null;
     if (user_id != null) {
       try {
@@ -31,22 +37,29 @@ exports.createHazard = async ({ type, lat, lng, severity, user_id, confidence })
           [user_id]
         );
         hazardReportsCount = countResult.rows[0]?.hazard_reports_count ?? null;
+        console.log("[HazardService] User reports count updated:", hazardReportsCount);
       } catch (err) {
-        // Backward compatibility: allow hazard creation even if the new
-        // hazard_reports_count column migration has not been applied yet.
+        console.warn("[HazardService] Could not update user reports count:", err.message);
+        console.warn("[HazardService] Error code:", err.code);
         if (err?.code !== "42703") {
+          console.error("[HazardService] Throwing error because code is not 42703");
           throw err;
         }
+        console.log("[HazardService] Ignoring column not found error (42703) - continuing with transaction");
       }
     }
+    */
 
     await client.query("COMMIT");
-    return { ...hazardResult.rows[0], hazard_reports_count: hazardReportsCount };
+    console.log("[HazardService] Transaction committed successfully");
+    return { ...hazardResult.rows[0], hazard_reports_count: null };
   } catch (err) {
     await client.query("ROLLBACK");
+    console.error("[HazardService] ❌ Transaction rolled back:", err.message);
     throw err;
   } finally {
     client.release();
+    console.log("[HazardService] Database connection released");
   }
 };
 
