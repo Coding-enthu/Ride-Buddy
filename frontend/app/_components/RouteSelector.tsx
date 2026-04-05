@@ -5,8 +5,13 @@ interface Route {
 	duration: number;
 }
 
+interface RouteAnalysis {
+	adjustedDuration?: number;
+}
+
 interface RouteSelectorProps {
 	routes: Route[];
+	routeAnalyses?: RouteAnalysis[];
 	selectedIndex: number;
 	onSelect: (index: number) => void;
 	onClose: () => void;
@@ -29,6 +34,7 @@ function formatDuration(seconds: number): string {
 
 export default function RouteSelector({
 	routes,
+	routeAnalyses,
 	selectedIndex,
 	onSelect,
 	onClose,
@@ -88,9 +94,15 @@ export default function RouteSelector({
 									<span className="route-selector__stat-icon">
 										🕐
 									</span>
-									<span>
-										{formatDuration(route.duration)}
-									</span>
+									<div>
+										<div>{formatDuration(routeAnalyses?.[index]?.adjustedDuration ?? route.duration)}</div>
+										{routeAnalyses?.[index]?.adjustedDuration !== undefined &&
+											routeAnalyses[index].adjustedDuration !== route.duration && (
+												<div className="route-selector__subtime">
+													Base: {formatDuration(route.duration)}
+												</div>
+											)}
+									</div>
 								</div>
 								<div className="route-selector__stat">
 									<span className="route-selector__stat-icon">

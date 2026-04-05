@@ -32,6 +32,7 @@ type Place = {
 interface RouteInfo {
   distance: number;
   duration: number;
+  originalDuration: number;
   hazardCount: number;
 }
 
@@ -64,6 +65,8 @@ interface RouteAnalysis {
   score: number;
   hazardCount: number;
   penalty: number;
+  estimatedDelaySeconds?: number;
+  adjustedDuration?: number;
   typeBreakdown: Record<string, number>;
 }
 
@@ -579,7 +582,8 @@ export default function Map() {
     const selectedAnalysis = allRoutesData.routeAnalyses?.[index];
     setRouteInfo({
       distance: selectedRoute.distance,
-      duration: selectedRoute.duration,
+      duration: selectedAnalysis?.adjustedDuration ?? selectedRoute.duration,
+      originalDuration: selectedRoute.duration,
       hazardCount: selectedAnalysis?.hazardCount ?? 0,
     });
 
@@ -727,7 +731,8 @@ export default function Map() {
       const bestAnalysis = data.routeAnalyses?.[0] ?? data.analysis;
       setRouteInfo({
         distance: data.bestRoute.distance,
-        duration: data.bestRoute.duration,
+        duration: bestAnalysis?.adjustedDuration ?? data.bestRoute.duration,
+        originalDuration: data.bestRoute.duration,
         hazardCount: bestAnalysis?.hazardCount ?? 0,
       });
 
@@ -1288,7 +1293,12 @@ export default function Map() {
           currentStep={navigation.steps[navigation.currentStepIndex] || null}
           distanceToTurn={navigation.distanceToNextTurn}
           totalDistance={allRoutesData?.allRoutes[selectedRouteIndex]?.distance || 0}
-          totalDuration={allRoutesData?.allRoutes[selectedRouteIndex]?.duration || 0}
+          totalDuration={
+            allRoutesData?.routeAnalyses?.[selectedRouteIndex]?.adjustedDuration ??
+            allRoutesData?.allRoutes[selectedRouteIndex]?.duration ??
+            0
+          }
+          originalTotalDuration={allRoutesData?.allRoutes[selectedRouteIndex]?.duration || 0}
           onExit={exitNavigation}
         />
       )}
@@ -1298,6 +1308,7 @@ export default function Map() {
         <RoutePanel
           distance={routeInfo?.distance ?? null}
           duration={routeInfo?.duration ?? null}
+          originalDuration={routeInfo?.originalDuration ?? null}
           hazardCount={routeInfo?.hazardCount ?? null}
           onClose={() => {
             setRouteInfo(null);
@@ -1313,6 +1324,7 @@ export default function Map() {
       {!navigation.isActive && allRoutesData && allRoutesData.allRoutes.length > 1 && (
         <RouteSelector
           routes={allRoutesData.allRoutes}
+          routeAnalyses={allRoutesData.routeAnalyses}
           selectedIndex={selectedRouteIndex}
           onSelect={handleRouteSelection}
           onClose={() => {
